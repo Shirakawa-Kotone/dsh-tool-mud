@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { createTranscript } from '../src/transcript.js'
 import { setTimeout as delay } from 'node:timers'
 import { MudSession } from '../src/session.js'
 import { fakeConnector, tick, wait } from './helpers.js'
@@ -171,6 +172,63 @@ test('a dropped socket releases a human handoff', async () => {
   assert.equal(session.lock, null)
   assert.equal(aborted, 1)
   await session.send('hp', { quietMs: 10 }).catch(() => {})
+})
+
+test('a log sink that fails asynchronously never crashes the process', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mud-broken-log-'))
+  // A directory where the daily file should be: createWriteStream emits EISDIR
+  // as an 'error' EVENT, which no try/catch around write() can see.
+  fs.mkdirSync(path.join(dir, 'mud-2026-11-06.log'))
+  const transcript = createTranscript({ dir, now: () => new Date('2026-11-06T00:00:00Z') })
+
+  assert.doesNotThrow(() => transcript.line('<<', 'first'))
+  await wait(50)
+  assert.doesNotThrow(() => transcript.line('<<', 'second'))
+  assert.equal(transcript.file !== null, true)
+})
+
+test('a read cannot steal the output of an in-flight send', async () => {
+  const { session, socket } = await connected()
+  socket.on('written', (line) => {
+    if (line.trim() === 'look') delay(() => socket.emit('data', Buffer.from('客房\r\n')), 10)
+  })
+
+  const sendPromise = session.send('look', { quietMs: 40 })
+  const readPromise = session.read(0)
+  const [sent, read] = await Promise.all([sendPromise, readPromise])
+
+  assert.match(sent, /客房/)
+  assert.equal(read, '', 'read must wait for the in-flight send')
+})
+
+test('concurrent connect() calls share one socket', async () => {
+  const { session, connector } = sessionWith()
+  const first = session.connect()
+  const second = session.connect()
+  await tick()
+  connector.last.emit('connect')
+  await Promise.all([first, second])
+
+  assert.equal(connector.sockets.length, 1)
+})
+
+test('close() releases a human handoff exactly once', async () => {
+  const { session } = await connected()
+  let aborted = 0
+  session.onDisconnect = () => { aborted += 1 }
+  session.lockSession('fullme')
+
+  session.close()
+
+  assert.equal(session.lock, null)
+  assert.equal(aborted, 1)
+})
+
+test('idleTimeoutMs: 0 reports the watchdog as off, not as imminent', async () => {
+  const { session } = await connected({ idleTimeoutMs: 0 })
+  const status = session.status()
+  assert.equal(status.watchdog, false)
+  assert.equal(status.idleLogoutInMs, null)
 })
 
 test('a human-held session is never idle-logged-out', async () => {

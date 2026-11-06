@@ -142,6 +142,7 @@ export class FullmeFlow {
   /** Give up on this challenge and hand the session back to the model. */
   cancel() {
     this.pending = null
+    this.session.needsHuman = null
     this.session.unlock()
     return this.state()
   }

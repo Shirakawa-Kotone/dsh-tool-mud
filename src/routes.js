@@ -59,6 +59,8 @@ export function createPanelRoutes({ flow, journal, notes, session, prefix = '/ds
         connected: state.connected,
         host: state.host,
         lock: state.lock,
+        watchdog: state.watchdog,
+        idleTimeoutMs: state.idleTimeoutMs,
         needsHuman: state.needsHuman,
         idleLogoutInMs: state.idleLogoutInMs,
         lastIdleLogout: state.lastIdleLogout,
@@ -103,6 +105,11 @@ export function createPanelRoutes({ flow, journal, notes, session, prefix = '/ds
     path: `${prefix}/fullme/submit`,
     async handler(req, res) {
       try {
+        // A double-click on 提交 must not look like a second answer.
+        if (flow.state().phase !== 'waiting') {
+          sendJson(res, 409, { ok: false, error: '没有进行中的 fullme 验证', ...flow.state() })
+          return
+        }
         const body = await readJson(req)
         const result = await flow.submit(body.answer)
         sendJson(res, 200, {

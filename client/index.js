@@ -292,9 +292,11 @@ window.__ModuleLoader__.load({
           status?.connected ? `已连接 ${status.host ?? ''}`.trim() : '未连接'),
         locked ? h('span', { style: styles.chip }, '🐱 人工接管中') : null,
         status?.needsHuman ? h('span', { style: styles.chip }, 'fullme 待处理') : null,
-        status?.idleLogoutInMs != null && !locked
-          ? h('span', { style: styles.muted }, `${Math.max(0, Math.round(status.idleLogoutInMs / 1000))}s 后闲置下线`)
-          : null)
+        status?.watchdog === false
+          ? h('span', { style: styles.muted }, '看门狗关闭')
+          : status?.idleLogoutInMs != null && !locked
+            ? h('span', { style: styles.muted }, `${Math.max(0, Math.round(status.idleLogoutInMs / 1000))}s 后闲置下线`)
+            : null)
 
       const fullmeBar = waiting
         ? h('div', { style: { ...styles.fullme, background: 'rgba(217,140,36,0.06)' }, 'data-panel': 'fullme' },

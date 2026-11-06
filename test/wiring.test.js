@@ -2,7 +2,24 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { apply, Config, inject, name } from '../src/index.js'
+// src/index.js pulls in @deepseek-ai/dsh-tools, which only exists inside a DSH
+// install. A bare clone has no node_modules, so this file skips instead of
+// failing the whole suite.
+let apply
+let Config
+let inject
+let name
+let loadError = null
+try {
+  ;({ apply, Config, inject, name } = await import('../src/index.js'))
+} catch (error) {
+  loadError = error
+}
+
+const skip = loadError
+  ? `needs @deepseek-ai/dsh-tools (${loadError.code ?? loadError.message})`
+  : undefined
+const wtest = (title, fn) => test(title, { skip }, fn)
 
 function fakeContext({ withWebServer = true } = {}) {
   const registered = []
@@ -43,7 +60,7 @@ const config = {
   logDir: '',
 }
 
-test('registers exactly one tool, named `mud` by default', () => {
+wtest('registers exactly one tool, named `mud` by default', () => {
   const ctx = fakeContext()
   apply(ctx, config)
   assert.equal(name, 'tool-mud')
@@ -52,13 +69,13 @@ test('registers exactly one tool, named `mud` by default', () => {
   assert.equal(ctx.registered[0].name, 'mud')
 })
 
-test('the tool name is configurable so a dev copy can coexist', () => {
+wtest('the tool name is configurable so a dev copy can coexist', () => {
   const ctx = fakeContext()
   apply(ctx, { ...config, toolName: 'mud_dev' })
   assert.equal(ctx.registered[0].name, 'mud_dev')
 })
 
-test('loading the plugin opens no socket', () => {
+wtest('loading the plugin opens no socket', () => {
   const ctx = fakeContext()
   apply(ctx, config)
   assert.equal(ctx.registered[0].name, 'mud')
@@ -66,7 +83,7 @@ test('loading the plugin opens no socket', () => {
   assert.equal(typeof ctx.dispose, 'function')
 })
 
-test('registers the six panel routes on a composed webserver', () => {
+wtest('registers the six panel routes on a composed webserver', () => {
   const ctx = fakeContext()
   apply(ctx, config)
   assert.deepEqual(ctx.routes.map((route) => route.path).sort(), [
@@ -80,7 +97,7 @@ test('registers the six panel routes on a composed webserver', () => {
   assert.ok(ctx.routes.every((route) => route.kind === 'exact'))
 })
 
-test('without a connection service the routes refuse instead of failing open', async () => {
+wtest('without a connection service the routes refuse instead of failing open', async () => {
   const ctx = fakeContext()
   apply(ctx, config) // fake ctx has no ctx.get('connection')
   const route = ctx.routes.find((entry) => entry.path === '/dsh-tool-mud/status')
@@ -89,14 +106,14 @@ test('without a connection service the routes refuse instead of failing open', a
   assert.equal(res.status, 403)
 })
 
-test('a headless host gets the tool but no routes', () => {
+wtest('a headless host gets the tool but no routes', () => {
   const ctx = fakeContext({ withWebServer: false })
   apply(ctx, config)
   assert.equal(ctx.registered.length, 1)
   assert.equal(ctx.routes.length, 0)
 })
 
-test('the status action answers without a connection', async () => {
+wtest('the status action answers without a connection', async () => {
   const ctx = fakeContext()
   apply(ctx, config)
   const result = await ctx.registered[0].execute({ action: 'status' })
@@ -106,7 +123,7 @@ test('the status action answers without a connection', async () => {
   assert.equal(result.connected, false)
 })
 
-test('send without text is rejected', async () => {
+wtest('send without text is rejected', async () => {
   const ctx = fakeContext()
   apply(ctx, config)
   await assert.rejects(
@@ -115,7 +132,7 @@ test('send without text is rejected', async () => {
   )
 })
 
-test('the config schema resolves the documented defaults', () => {
+wtest('the config schema resolves the documented defaults', () => {
   const resolved = Config({})
   assert.equal(resolved.toolName, 'mud')
   assert.equal(resolved.host, 'mud.pkuxkx.net')

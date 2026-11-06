@@ -79,6 +79,64 @@ test('start() is idempotent while a challenge is open', async () => {
   assert.equal(session.sent.length, 1)
 })
 
+test('the challenge fetch carries an abort signal', async () => {
+  const session = fakeSession()
+  let init
+  const flow = new FullmeFlow({
+    session,
+    fetch: async (_url, options) => {
+      init = options
+      return { ok: true, status: 200, text: async () => PAGE }
+    },
+  })
+
+  await flow.start()
+
+  assert.ok(init.signal instanceof AbortSignal, 'fetch must be abortable')
+})
+
+test('a timed-out fetch unlocks and clears the challenge', async () => {
+  const session = fakeSession()
+  const flow = new FullmeFlow({
+    session,
+    fetch: async () => {
+      throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+    },
+  })
+
+  await assert.rejects(() => flow.start(), /aborted/)
+  assert.equal(session.lock, null, 'the lock must not outlive a failed fetch')
+  assert.equal(flow.state().phase, 'idle')
+})
+
+test('abort() drops the challenge without touching the wire', async () => {
+  const session = fakeSession()
+  const flow = new FullmeFlow({
+    session,
+    fetch: async () => ({ ok: true, status: 200, text: async () => PAGE }),
+  })
+  await flow.start()
+
+  flow.abort()
+
+  assert.equal(flow.state().phase, 'idle')
+  assert.equal(session.lock, null)
+})
+
+test('cancel() also clears the needs-human flag', async () => {
+  const session = fakeSession()
+  session.needsHuman = { kind: 'fullme' }
+  const flow = new FullmeFlow({
+    session,
+    fetch: async () => ({ ok: true, status: 200, text: async () => PAGE }),
+  })
+  await flow.start()
+
+  flow.cancel()
+
+  assert.equal(session.needsHuman, null)
+})
+
 test('two concurrent starts open exactly one challenge', async () => {
   const session = fakeSession()
   let fetches = 0

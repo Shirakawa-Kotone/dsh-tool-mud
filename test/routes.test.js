@@ -152,6 +152,15 @@ test('notes reports a missing file instead of failing the panel', async () => {
   assert.equal(json.diary, null)
 })
 
+test('submit without an open challenge is a 409, not a silent no-op', async () => {
+  const { byPath } = routes()
+  const { status, json } = await callRoute(byPath['/dsh-tool-mud/fullme/submit'], {
+    body: { answer: '自己' },
+  })
+  assert.equal(status, 409)
+  assert.match(json.error, /没有进行中/)
+})
+
 test('start locks the session and returns the image url', async () => {
   const { byPath, session } = routes()
   const { status, json } = await callRoute(byPath['/dsh-tool-mud/fullme/start'])
@@ -182,6 +191,7 @@ test('submit without an answer fails cleanly with 400', async () => {
 
 test('an oversized body is rejected instead of buffered', async () => {
   const { byPath } = routes()
+  await callRoute(byPath['/dsh-tool-mud/fullme/start'])
   const huge = { answer: 'x'.repeat(10_000) }
   const { status, json } = await callRoute(byPath['/dsh-tool-mud/fullme/submit'], { body: huge })
   assert.equal(status, 400)

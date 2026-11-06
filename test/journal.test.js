@@ -41,6 +41,13 @@ test('carries the actor so the panel can tell the model from the human', () => {
   assert.deepEqual(journal.since(0).entries.map((entry) => entry.actor), ['model', 'human'])
 })
 
+test('a caller that fell behind the ring is told lines were dropped', () => {
+  const journal = createJournal({ limit: 3, now: at })
+  for (const line of ['1', '2', '3', '4', '5']) journal.record('server', line)
+  assert.equal(journal.since(0).dropped, true)
+  assert.equal(journal.since(4).dropped, false)
+})
+
 test('clear() resets both entries and the cursor', () => {
   const journal = createJournal({ now: at })
   journal.record('server', 'x')
@@ -56,6 +63,22 @@ test('notes returns only the tail of a large file and flags truncation', () => {
   const { plan: read } = createNotes({ planPath: plan, maxChars: 10 }).read()
   assert.equal(read.text, 'AAAAAATAIL')
   assert.equal(read.truncated, true)
+})
+
+test('a notes tail never starts on half an emoji', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mud-notes-emoji-'))
+  const plan = path.join(dir, 'plan.md')
+  fs.writeFileSync(plan, 'AAAA😀😀')
+  const { plan: read } = createNotes({ planPath: plan, maxChars: 3 }).read()
+  assert.equal(read.text, '😀', 'a lone low surrogate must be dropped')
+})
+
+test('an unchanged notes file is served from cache', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mud-notes-cache-'))
+  const plan = path.join(dir, 'plan.md')
+  fs.writeFileSync(plan, 'stable')
+  const notes = createNotes({ planPath: plan })
+  assert.equal(notes.read().plan, notes.read().plan)
 })
 
 test('notes leaves an unconfigured section null', () => {

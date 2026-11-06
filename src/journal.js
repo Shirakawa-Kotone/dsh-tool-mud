@@ -36,9 +36,13 @@ export function createJournal({ limit = DEFAULT_JOURNAL_LIMIT, now = () => new D
 
     since(cursor = 0) {
       const from = Number.isFinite(cursor) ? Math.max(0, cursor) : 0
+      const page = from >= seq ? [] : entries.filter((entry) => entry.seq > from)
       return {
         cursor: seq,
-        entries: from >= seq ? [] : entries.filter((entry) => entry.seq > from),
+        entries: page,
+        // True when the caller asked for entries the ring already dropped, so
+        // the panel can say "there is a gap" instead of silently showing less.
+        dropped: page.length > 0 && page[0].seq > from + 1,
       }
     },
 

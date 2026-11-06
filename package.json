@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-mud",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH plugin built for 北大侠客行 (pkuxkx): one persistent telnet session as a `mud` tool, plus a right-sidebar panel for logs, AI actions, plan/diary, and a human-only fullme handoff.",
   "type": "module",
   "main": "src/index.js",
@@ -14,6 +14,7 @@
     "client",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
     "cordis.patch.example.yml"
   ],
   "scripts": {

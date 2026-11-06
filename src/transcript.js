@@ -17,8 +17,16 @@ export function createTranscript({ dir, now = () => new Date() }) {
   let stream = null
   let day = null
   let file = null
+  /**
+   * Set once the sink has failed. A broken log directory (EISDIR, ENOSPC,
+   * EACCES, a directory that was rotated away) would otherwise raise an
+   * uncaught 'error' event and take the whole host process with it — and with
+   * it the idle watchdog that exists to keep the character from idling online.
+   */
+  let broken = false
 
   function open() {
+    if (broken) return null
     const today = now().toISOString().slice(0, 10)
     if (today === day && stream) return stream
     close()
@@ -26,6 +34,12 @@ export function createTranscript({ dir, now = () => new Date() }) {
       fs.mkdirSync(dir, { recursive: true })
       file = path.join(dir, `mud-${today}.log`)
       stream = fs.createWriteStream(file, { flags: 'a' })
+      // Asynchronous fs errors are events, not exceptions: without this the
+      // process dies on the first ENOSPC/EACCES after the stream was created.
+      stream.on('error', () => {
+        broken = true
+        close()
+      })
       day = today
     } catch {
       stream = null

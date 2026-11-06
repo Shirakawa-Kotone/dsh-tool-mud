@@ -95,6 +95,8 @@ export class MudSession {
     this.buffer = ''
     this.cursor = 0
     this.connected = false
+    /** True between `save`+`quit` and the socket actually closing. */
+    this.loggingOut = false
     this.error = null
     this.resolvedHost = null
     this.lastActivity = 0
@@ -195,6 +197,9 @@ export class MudSession {
 
   idleLogout(idle) {
     this.clearIdleWatch()
+    // From here on the session accepts no more writes: the socket is doomed.
+    this.loggingOut = true
+    this.connected = false
     const secs = Math.round(idle / 1000)
     this.lastIdleLogout = this.now().toISOString()
     this.append(`\n>>> [idle] 已有 ${secs} 秒没有操作，自动 save + quit 下线。\n`, { log: true })
@@ -211,7 +216,7 @@ export class MudSession {
       } catch {
         /* ignore */
       }
-      this.connected = false
+      this.loggingOut = false
       this.append('>>> [idle] 连接已关闭。\n', { log: true })
     }, this.closeDelayMs)
     if (this.closeTimer.unref) this.closeTimer.unref()
@@ -247,6 +252,7 @@ export class MudSession {
 
   async connect() {
     if (this.socket && !this.socket.destroyed && this.connected) return
+    this.loggingOut = false
     if (this.connecting) return this.connecting
     this.connecting = this.openSocket().finally(() => {
       this.connecting = null
@@ -289,16 +295,27 @@ export class MudSession {
         reject(error)
       })
       socket.on('close', () => {
-        if (this.connected) this.note('连接已断开')
+        // An intentional close() has already cleared `connected` and released
+        // the handoff; only an unexpected drop owes the callback.
+        const unexpected = this.connected
+        if (unexpected) this.note('连接已断开')
         this.connected = false
         this.clearIdleWatch()
         // A dropped socket must not leave a human handoff (and its lock) behind:
         // the captcha is gone with the connection, so hand the session back.
         const hadLock = this.lock !== null
         this.lock = null
-        this.onDisconnect?.()
+        if (unexpected) this.onDisconnect?.()
         if (hadLock) this.note('连接断开，人工接管已自动解除')
       })
+    })
+  }
+
+  /** Serialized read: never steal the output of an in-flight send(). */
+  read(waitMs = 0) {
+    return this.serialize(async () => {
+      if (waitMs > 0) await this.sleep(Math.min(waitMs, 5000))
+      return this.take()
     })
   }
 
@@ -366,6 +383,7 @@ export class MudSession {
   async sendNow(text, { quietMs = 1200, maxMs = 15_000, bypassLock = false, actor = 'model' } = {}) {
     if (typeof text !== 'string' || text === '') throw new Error('mud: "text" must be a non-empty string')
     this.assertUnlocked(bypassLock)
+    if (this.loggingOut || !this.connected) throw new Error('mud: 连接已断（正在自动下线），请先 login')
     this.touch()
     this.log('>>', text)
     this.journal.record('agent', text, { actor })
@@ -390,14 +408,16 @@ export class MudSession {
 
   status() {
     const idleFor = this.lastActivity ? Date.now() - this.lastActivity : 0
+    const watchdog = this.idleTimeoutMs > 0
     return {
       connected: this.connected,
       buffered: this.buffer.length,
       error: this.error,
       host: this.resolvedHost,
       idleTimeoutMs: this.idleTimeoutMs,
+      watchdog,
       idleForMs: idleFor,
-      idleLogoutInMs: this.connected ? Math.max(0, this.idleTimeoutMs - idleFor) : null,
+      idleLogoutInMs: watchdog && this.connected ? Math.max(0, this.idleTimeoutMs - idleFor) : null,
       lastIdleLogout: this.lastIdleLogout,
       needsHuman: this.needsHuman,
       lock: this.lock,
@@ -411,13 +431,16 @@ export class MudSession {
       this.closeTimer = null
     }
     this.lock = null
-    this.onDisconnect?.()
+    this.loggingOut = false
+    // Clear the flag before the socket's own 'close' handler runs, so an
+    // intentional close does not also report an unexpected disconnect.
+    this.connected = false
     try {
       this.socket?.destroy()
     } catch {
       /* ignore */
     }
-    this.connected = false
+    this.onDisconnect?.()
     this.transcript?.close()
   }
 }

@@ -1,5 +1,8 @@
-> ⚠️ 改这个文件会触发 profile 热重载，正在跑的 telnet 会话会被重建。
-> 线上有人在玩的时候不要动；要试新版本，用下面的 `toolName: mud_dev` 并存。
+# ⚠️ 改这个文件会触发 profile 热重载，正在跑的 telnet 会话会被重建。
+# 线上有人在玩的时候不要动；要试新版本，用 `toolName: mud_dev` 并存。
+#
+# 把 `~` 换成你的路径也可以：插件会展开 `~`（`credentialsPath` / `logDir` /
+# `planPath` / `diaryPath` 都支持）。
 
 - insert:
     - id: tool-mud
@@ -10,8 +13,11 @@
         port: 8080
         encoding: utf-8
         encodingMenu: '2'
-        credentialsPath: /Users/chen/dev/pkuxkx/agent-xkx/state/creds.json
-        logDir: /Users/chen/dev/pkuxkx/agent-xkx/logs
+        credentialsPath: ~/.dsh-tool-mud/creds.json
+        logDir: ~/.dsh-tool-mud/logs
         fallbackAddresses:
           - 47.110.45.145
         idleTimeoutMs: 180000
+        # 想让右侧栏显示 agent 的计划和日记，就填这两个路径
+        # planPath: ~/notes/PROGRESS.md
+        # diaryPath: ~/notes/DIARY.md

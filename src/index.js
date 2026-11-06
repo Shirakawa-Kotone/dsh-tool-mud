@@ -18,6 +18,14 @@ export const inject = ['tools']
 
 const dataHome = path.join(os.homedir(), '.dsh-tool-mud')
 
+/** `~` is not expanded by fs, and a literal `~` directory is never what anyone means. */
+function expandHome(file) {
+  if (typeof file !== 'string' || file === '') return ''
+  if (file === '~') return os.homedir()
+  if (file.startsWith('~/')) return path.join(os.homedir(), file.slice(2))
+  return file
+}
+
 export const Config = z.object({
   toolName: z.string().default('mud').description('Name the tool is registered under.'),
   host: z.string().default('mud.pkuxkx.net').description('MUD host name.'),
@@ -37,8 +45,6 @@ export const Config = z.object({
   planPath: z.string().default('').description('File shown as the plan section; empty hides it.'),
   diaryPath: z.string().default('').description('File shown as the diary section; empty hides it.'),
 })
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function clip(text, max = 6000) {
   if (text.length <= max) return text
@@ -82,8 +88,8 @@ export function apply(ctx, config = {}) {
     port: config.port ?? 8080,
     encoding: config.encoding ?? 'utf-8',
     encodingMenu: config.encodingMenu ?? '2',
-    credentialsPath: config.credentialsPath ?? path.join(dataHome, 'creds.json'),
-    logDir: config.logDir === undefined ? path.join(dataHome, 'logs') : config.logDir,
+    credentialsPath: expandHome(config.credentialsPath ?? path.join(dataHome, 'creds.json')),
+    logDir: expandHome(config.logDir === undefined ? path.join(dataHome, 'logs') : config.logDir),
     fallbackAddresses: config.fallbackAddresses ?? ['47.110.45.145'],
     idleTimeoutMs,
   })
@@ -94,8 +100,8 @@ export function apply(ctx, config = {}) {
   // A dropped socket ends the challenge; the lock must not outlive it.
   session.onDisconnect = () => flow.abort()
   const notes = createNotes({
-    planPath: config.planPath ?? '',
-    diaryPath: config.diaryPath ?? '',
+    planPath: expandHome(config.planPath ?? ''),
+    diaryPath: expandHome(config.diaryPath ?? ''),
   })
   const routePrefix = config.panelRoutePrefix ?? '/dsh-tool-mud'
 
@@ -124,8 +130,10 @@ export function apply(ctx, config = {}) {
       + 'action "login" connects and types the stored id/password (nothing else); '
       + '"send" types one command and returns the new output; "read" returns output that '
       + 'arrived since the last call; "status" reports the connection; "close" hangs up. '
-      + 'The session saves and disconnects itself after '
-      + `${Math.round(idleTimeoutMs / 60000)} minutes with no tool call. `
+      + (idleTimeoutMs > 0
+        ? 'The session saves and disconnects itself after '
+          + `${Math.round(idleTimeoutMs / 60000)} minutes with no tool call. `
+        : 'The idle watchdog is disabled for this deployment. ')
       + 'fullme captchas are only detected, never solved: a human has to read the image.',
     parameters: {
       action: {
@@ -170,8 +178,9 @@ export function apply(ctx, config = {}) {
           break
         }
         case 'read':
-          await sleep(Math.min(waitMs, 5000))
-          output = session.take()
+          // Serialized like send(): a concurrent read must not eat the output
+          // of a command the model just typed.
+          output = await session.read(Math.min(waitMs, 5000))
           break
         case 'status':
           output = JSON.stringify(session.status())
