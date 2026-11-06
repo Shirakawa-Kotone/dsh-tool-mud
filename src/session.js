@@ -336,9 +336,16 @@ export class MudSession {
 
   async loginNow({ timeoutMs = 60_000, quietMs = 6_000 } = {}) {
     this.assertUnlocked()
+    const creds = this.credentials()
+    // A missing or half-written file must fail before the socket is even opened.
+    // Typing the empty string at the id prompt just re-prompts, five times a
+    // second, for a minute — and the model reads that as "login is broken".
+    if (!creds || typeof creds.id !== 'string' || creds.id === ''
+      || typeof creds.password !== 'string' || creds.password === '') {
+      throw new Error(`mud: 凭据文件缺失或不完整：${this.credentialsPath}（需要 { "id": ..., "password": ... }）`)
+    }
     this.touch()
     await this.connect()
-    const creds = this.credentials()
     const deadline = Date.now() + timeoutMs
     let quietSince = Date.now()
     let seenAny = false

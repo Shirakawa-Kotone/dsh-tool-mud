@@ -167,7 +167,7 @@ chmod 600 ~/.dsh-tool-mud/creds.json
 | `port` | `8080` | telnet 端口 |
 | `encoding` | `utf-8` | 解码方式 |
 | `encodingMenu` | `2` | 编码菜单里 UTF-8 的按键 |
-| `credentialsPath` | `~/.dsh-tool-mud/creds.json` | 账号文件，`{ "id", "password" }` |
+| `credentialsPath` | `~/.dsh-tool-mud/creds.json` | 账号文件，`{ "id", "password" }`；**缺失时 `login` 直接报错，不会往游戏里打空行** |
 | `logDir` | `~/.dsh-tool-mud/logs` | 每日转录 `mud-YYYY-MM-DD.log`；空串关闭 |
 | `fallbackAddresses` | `["47.110.45.145"]` | DNS 失败时的兜底地址（本机 getaddrinfo 会间歇 `ENOTFOUND`） |
 | `idleTimeoutMs` | `180000` | 无工具调用多久后下线；**`0` 关闭看门狗**（`status` 报 `watchdog: false`，面板显示“看门狗关闭”） |

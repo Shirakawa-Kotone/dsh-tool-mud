@@ -174,6 +174,16 @@ test('a dropped socket releases a human handoff', async () => {
   await session.send('hp', { quietMs: 10 }).catch(() => {})
 })
 
+test('login refuses to type blanks when the credentials file is missing', async () => {
+  const { session, connector } = sessionWith({
+    credentialsPath: '/nonexistent/mud/creds.json',
+  })
+
+  await assert.rejects(() => session.login(), /凭据文件缺失或不完整/)
+  assert.equal(connector.sockets.length, 0, 'must not even open a socket')
+  assert.deepEqual(connector.last?.writes ?? [], [])
+})
+
 test('a log sink that fails asynchronously never crashes the process', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mud-broken-log-'))
   // A directory where the daily file should be: createWriteStream emits EISDIR
