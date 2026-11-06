@@ -1,9 +1,16 @@
 /**
- * The HTTP side of the manual fullme flow, served to the plugin's own panel.
+ * The HTTP side of the MUD panel, served to the plugin's own browser half.
  *
- * Plain node:http handlers registered on `ctx.webServer`, so the browser half
- * needs no typert codegen and no Remote descriptors: same-origin `fetch` is
- * enough. Every route answers JSON and never throws out of the handler.
+ * Plain node:http handlers registered on `ctx.webServer` — the browser half
+ * needs no typert codegen, just same-origin `fetch`. Every route answers JSON
+ * and never throws out of the handler.
+ *
+ *   GET  <prefix>/status          connection + fullme state
+ *   GET  <prefix>/journal?since=N new panel events after cursor N
+ *   GET  <prefix>/notes           the agent's plan and diary tails
+ *   POST <prefix>/fullme/start    ask the server for a captcha
+ *   POST <prefix>/fullme/submit   submit the two characters a human read
+ *   POST <prefix>/fullme/cancel   release the session without submitting
  */
 
 const MAX_BODY_BYTES = 4096
@@ -29,24 +36,58 @@ async function readJson(req) {
   return raw ? JSON.parse(raw) : {}
 }
 
+function query(req) {
+  return new URL(req.url ?? '/', 'http://panel.invalid').searchParams
+}
+
 /**
  * @param {object} options
  * @param {import('./fullme.js').FullmeFlow} options.flow
+ * @param {ReturnType<import('./journal.js').createJournal>} options.journal
+ * @param {ReturnType<import('./notes.js').createNotes>} options.notes
+ * @param {import('./session.js').MudSession} options.session
  * @param {string} [options.prefix]
- * @returns {Array<{kind: 'exact', path: string, handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}>}
  */
-export function createFullmeRoutes({ flow, prefix = '/dsh-tool-mud/fullme' }) {
+export function createPanelRoutes({ flow, journal, notes, session, prefix = '/dsh-tool-mud' }) {
   const status = {
     kind: 'exact',
     path: `${prefix}/status`,
     async handler(_req, res) {
-      sendJson(res, 200, { ok: true, ...flow.state() })
+      const state = session.status()
+      sendJson(res, 200, {
+        ok: true,
+        connected: state.connected,
+        host: state.host,
+        lock: state.lock,
+        needsHuman: state.needsHuman,
+        idleLogoutInMs: state.idleLogoutInMs,
+        lastIdleLogout: state.lastIdleLogout,
+        ...flow.state(),
+      })
+    },
+  }
+
+  const journalRoute = {
+    kind: 'exact',
+    path: `${prefix}/journal`,
+    async handler(req, res) {
+      const cursor = Number(query(req).get('since') ?? 0)
+      const page = journal.since(Number.isFinite(cursor) ? cursor : 0)
+      sendJson(res, 200, { ok: true, cursor: page.cursor, entries: page.entries })
+    },
+  }
+
+  const notesRoute = {
+    kind: 'exact',
+    path: `${prefix}/notes`,
+    async handler(_req, res) {
+      sendJson(res, 200, { ok: true, ...notes.read() })
     },
   }
 
   const start = {
     kind: 'exact',
-    path: `${prefix}/start`,
+    path: `${prefix}/fullme/start`,
     async handler(_req, res) {
       try {
         const state = await flow.start()
@@ -59,7 +100,7 @@ export function createFullmeRoutes({ flow, prefix = '/dsh-tool-mud/fullme' }) {
 
   const submit = {
     kind: 'exact',
-    path: `${prefix}/submit`,
+    path: `${prefix}/fullme/submit`,
     async handler(req, res) {
       try {
         const body = await readJson(req)
@@ -68,7 +109,7 @@ export function createFullmeRoutes({ flow, prefix = '/dsh-tool-mud/fullme' }) {
           ok: true,
           output: result.output,
           ...result.state,
-          needsHuman: flow.session.needsHuman,
+          needsHuman: session.needsHuman,
         })
       } catch (error) {
         sendJson(res, 400, { ok: false, error: String(error?.message ?? error), ...flow.state() })
@@ -78,11 +119,11 @@ export function createFullmeRoutes({ flow, prefix = '/dsh-tool-mud/fullme' }) {
 
   const cancel = {
     kind: 'exact',
-    path: `${prefix}/cancel`,
+    path: `${prefix}/fullme/cancel`,
     async handler(_req, res) {
       sendJson(res, 200, { ok: true, ...flow.cancel() })
     },
   }
 
-  return [status, start, submit, cancel]
+  return [status, journalRoute, notesRoute, start, submit, cancel]
 }

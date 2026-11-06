@@ -56,6 +56,9 @@ export class FullmeFlow {
     this.now = now
     /** @type {null | {filename: string, imageUrl: string, since: string}} */
     this.pending = null
+    /** In-flight start(), so a double click cannot open two challenges. */
+    this.starting = null
+    this.fetchTimeoutMs = 10_000
   }
 
   state() {
@@ -72,8 +75,16 @@ export class FullmeFlow {
    * Ask the server for a challenge and fetch its image.
    * @returns {Promise<{filename: string, imageUrl: string, since: string}>}
    */
-  async start() {
-    if (this.pending) return this.state()
+  start() {
+    if (this.pending) return Promise.resolve(this.state())
+    if (this.starting) return this.starting
+    this.starting = this.startNow().finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
+
+  async startNow() {
     if (!this.session.connected) await this.session.connect()
 
     this.session.lockSession('fullme')
@@ -83,7 +94,10 @@ export class FullmeFlow {
       if (!filename) {
         throw new Error(`fullme: 服务器没有返回验证码链接：${output.trim().slice(-200) || '(无输出)'}`)
       }
-      const page = await this.fetch(`${this.host}/robot.php?filename=${filename}`)
+      const page = await this.fetch(`${this.host}/robot.php?filename=${filename}`, {
+        // A stalled captcha host must not hold the session lock forever.
+        signal: AbortSignal.timeout(this.fetchTimeoutMs),
+      })
       if (!page.ok) throw new Error(`fullme: 取验证码页面失败 HTTP ${page.status}`)
       const imageUrl = parseImageUrl(await page.text(), this.host)
       if (!imageUrl) throw new Error('fullme: 验证码页面里没有图片链接')
@@ -104,13 +118,25 @@ export class FullmeFlow {
   async submit(answer) {
     const text = String(answer ?? '').trim()
     if (!text) throw new Error('fullme: 验证码不能为空')
-    this.pending = null
     try {
-      const output = await this.session.send(`fullme ${text}`, { quietMs: 1500, bypassLock: true })
+      const output = await this.session.send(`fullme ${text}`, {
+        quietMs: 1500,
+        bypassLock: true,
+        actor: 'human',
+      })
+      // Only a delivered answer ends the challenge; a failed send keeps it open
+      // so the human can retry instead of losing the image.
+      this.pending = null
       return { output, state: this.state() }
     } finally {
       this.session.unlock()
     }
+  }
+
+  /** The socket went away underneath us: drop the challenge, keep nothing stale. */
+  abort() {
+    this.pending = null
+    this.session.unlock()
   }
 
   /** Give up on this challenge and hand the session back to the model. */

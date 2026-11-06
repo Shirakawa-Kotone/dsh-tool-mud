@@ -79,6 +79,24 @@ test('start() is idempotent while a challenge is open', async () => {
   assert.equal(session.sent.length, 1)
 })
 
+test('two concurrent starts open exactly one challenge', async () => {
+  const session = fakeSession()
+  let fetches = 0
+  const flow = new FullmeFlow({
+    session,
+    fetch: async (...args) => {
+      fetches += 1
+      return { ok: true, status: 200, text: async () => PAGE }
+    },
+  })
+
+  const [a, b] = await Promise.all([flow.start(), flow.start()])
+
+  assert.deepEqual(a, b)
+  assert.equal(session.sent.filter((call) => call.text === 'fullme').length, 1)
+  assert.equal(fetches, 1)
+})
+
 test('a reply without a challenge link unlocks and reports the output', async () => {
   const session = fakeSession({ reply: '你没有请求 fullme 。\n' })
   const flow = new FullmeFlow({ session, fetch: fakeFetch().impl })

@@ -123,6 +123,56 @@ test('idle logout sends save + quit and hangs up', async () => {
   assert.ok(session.status().lastIdleLogout)
 })
 
+test('idleTimeoutMs: 0 disables the watchdog instead of logging out at once', async () => {
+  const { session, socket } = await connected({ idleTimeoutMs: 0 })
+  session.lastActivity = Date.now() - 60_000
+
+  assert.equal(session.checkIdle(), false)
+  assert.equal(socket.writes.length, 0)
+})
+
+test('handing the session back does not immediately idle-log-out', async () => {
+  const { session, socket } = await connected({ idleTimeoutMs: 1000 })
+  session.lockSession('fullme')
+  session.lastActivity = Date.now() - 30_000
+
+  session.unlock()
+
+  assert.equal(session.checkIdle(), false)
+  assert.equal(socket.writes.length, 0)
+})
+
+test('concurrent sends are serialized instead of interleaving', async () => {
+  const { session, socket } = await connected()
+  const order = []
+  socket.on('written', (line) => {
+    order.push(line.trim())
+    delay(() => socket.emit('data', Buffer.from(`${line.trim()} ok\r\n`)), 5)
+  })
+
+  const [first, second] = await Promise.all([
+    session.send('look', { quietMs: 20 }),
+    session.send('hp', { quietMs: 20 }),
+  ])
+
+  assert.deepEqual(order, ['look', 'hp'])
+  assert.match(first, /look ok/)
+  assert.match(second, /hp ok/)
+})
+
+test('a dropped socket releases a human handoff', async () => {
+  const { session, socket } = await connected()
+  let aborted = 0
+  session.onDisconnect = () => { aborted += 1 }
+  session.lockSession('fullme')
+
+  socket.emit('close')
+
+  assert.equal(session.lock, null)
+  assert.equal(aborted, 1)
+  await session.send('hp', { quietMs: 10 }).catch(() => {})
+})
+
 test('a human-held session is never idle-logged-out', async () => {
   const { session, socket } = await connected({ idleTimeoutMs: 10 })
   session.lockSession('fullme')

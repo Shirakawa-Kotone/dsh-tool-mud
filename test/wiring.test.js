@@ -12,6 +12,8 @@ function fakeContext({ withWebServer = true } = {}) {
     registered,
     routes,
     tools: { register: (tool) => registered.push(tool) },
+    // No composed connection service, like a headless webServer-only host.
+    get: () => undefined,
     effect: (factory) => {
       const dispose = factory()
       if (typeof dispose === 'function') disposers.push(dispose)
@@ -64,16 +66,27 @@ test('loading the plugin opens no socket', () => {
   assert.equal(typeof ctx.dispose, 'function')
 })
 
-test('registers the four fullme panel routes on a composed webserver', () => {
+test('registers the six panel routes on a composed webserver', () => {
   const ctx = fakeContext()
   apply(ctx, config)
   assert.deepEqual(ctx.routes.map((route) => route.path).sort(), [
     '/dsh-tool-mud/fullme/cancel',
     '/dsh-tool-mud/fullme/start',
-    '/dsh-tool-mud/fullme/status',
     '/dsh-tool-mud/fullme/submit',
+    '/dsh-tool-mud/journal',
+    '/dsh-tool-mud/notes',
+    '/dsh-tool-mud/status',
   ])
   assert.ok(ctx.routes.every((route) => route.kind === 'exact'))
+})
+
+test('without a connection service the routes refuse instead of failing open', async () => {
+  const ctx = fakeContext()
+  apply(ctx, config) // fake ctx has no ctx.get('connection')
+  const route = ctx.routes.find((entry) => entry.path === '/dsh-tool-mud/status')
+  const res = { status: 0, headers: null, body: '', writeHead(status) { this.status = status }, end(body) { this.body = body ?? '' } }
+  await route.handler({ url: '/dsh-tool-mud/status', method: 'GET', async *[Symbol.asyncIterator]() {} }, res)
+  assert.equal(res.status, 403)
 })
 
 test('a headless host gets the tool but no routes', () => {

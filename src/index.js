@@ -10,7 +10,8 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEFAULT_IDLE_MS, MudSession } from './session.js'
 import { FullmeFlow } from './fullme.js'
-import { createFullmeRoutes } from './routes.js'
+import { createNotes } from './notes.js'
+import { createPanelRoutes } from './routes.js'
 
 export const name = 'tool-mud'
 export const inject = ['tools']
@@ -31,8 +32,10 @@ export const Config = z.object({
     .description('Addresses tried in order when DNS resolution fails.'),
   idleTimeoutMs: z.number().step(1).min(0).default(DEFAULT_IDLE_MS)
     .description('Idle time before the session saves and quits itself; 0 disables the watchdog.'),
-  fullmeRoutePrefix: z.string().default('/dsh-tool-mud/fullme')
-    .description('Base path of the manual fullme panel endpoints, served when a webServer is composed.'),
+  panelRoutePrefix: z.string().default('/dsh-tool-mud')
+    .description('Base path of the MUD panel endpoints, served when a webServer is composed.'),
+  planPath: z.string().default('').description('File shown as the plan section; empty hides it.'),
+  diaryPath: z.string().default('').description('File shown as the diary section; empty hides it.'),
 })
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -40,6 +43,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 function clip(text, max = 6000) {
   if (text.length <= max) return text
   return `…[${text.length - max} chars trimmed]…\n` + text.slice(-max)
+}
+
+/**
+ * Apply the host's own browser fence (Host/Origin checks plus the session cookie)
+ * to our routes. A custom webServer route is public by default; this is the only
+ * thing standing between a stray request and a session that types into the game.
+ */
+function fence(ctx, handler) {
+  return async (req, res) => {
+    const connection = ctx.get('connection')
+    // Fail closed: a route that types into the game must never be reachable
+    // just because the connection service is not composed (or not yet active).
+    const rejection = connection ? connection.requestRejection(req) : 403
+    if (rejection !== undefined) {
+      res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+      return
+    }
+    await handler(req, res)
+  }
 }
 
 function needsHumanNote(session) {
@@ -68,18 +91,27 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => () => session.close())
 
   const flow = new FullmeFlow({ session })
-  const routePrefix = config.fullmeRoutePrefix ?? '/dsh-tool-mud/fullme'
-  const routeDisposers = []
+  // A dropped socket ends the challenge; the lock must not outlive it.
+  session.onDisconnect = () => flow.abort()
+  const notes = createNotes({
+    planPath: config.planPath ?? '',
+    diaryPath: config.diaryPath ?? '',
+  })
+  const routePrefix = config.panelRoutePrefix ?? '/dsh-tool-mud'
 
   // The panel routes exist only where a browser-facing webserver is composed;
   // a headless host still gets the tool, just no panel.
   ctx.inject(['webServer'], (child) => {
     child.effect(() => {
-      const routes = createFullmeRoutes({ flow, prefix: routePrefix })
-      for (const route of routes) routeDisposers.push(child.webServer.register(route))
-      return () => {
-        while (routeDisposers.length) routeDisposers.pop()()
-      }
+      const disposers = createPanelRoutes({
+        flow,
+        journal: session.journal,
+        notes,
+        session,
+        prefix: routePrefix,
+      })
+        .map((route) => child.webServer.register({ ...route, handler: fence(child, route.handler) }))
+      return () => disposers.forEach((dispose) => dispose())
     })
   })
 

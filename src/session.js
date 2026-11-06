@@ -11,6 +11,7 @@ import net from 'node:net'
 import { createTelnetStream, normalizeNewlines, stripAnsi } from './telnet.js'
 import { detectFullme, findLoginPrompt } from './prompts.js'
 import { createTranscript } from './transcript.js'
+import { createJournal } from './journal.js'
 
 export const DEFAULT_IDLE_MS = 180_000
 /** How often the idle watchdog wakes up. */
@@ -85,6 +86,7 @@ export class MudSession {
     this.now = options.now ?? (() => new Date())
 
     this.transcript = options.logDir ? createTranscript({ dir: options.logDir, now: this.now }) : null
+    this.journal = options.journal ?? createJournal({ now: this.now })
 
     this.socket = null
     this.telnet = null
@@ -103,16 +105,37 @@ export class MudSession {
     /** Set while a human drives the session (a fullme captcha); the tool refuses model calls. */
     /** @type {null | {reason: string, since: string}} */
     this.lock = null
+    /** Serializes login/send so two callers never interleave on one buffer. */
+    this.queue = Promise.resolve()
+    /** In-flight connect, so concurrent callers share one socket. */
+    this.connecting = null
+    /** Grace timer between `quit` and socket teardown. */
+    this.closeTimer = null
+    /** Called when the socket closes on its own, so a human-held session is released. */
+    this.onDisconnect = null
+  }
+
+  /** Run `fn` after every earlier session operation, whatever their outcome. */
+  serialize(fn) {
+    const run = this.queue.then(fn, fn)
+    this.queue = run.then(() => {}, () => {})
+    return run
   }
 
   /** Hand the session to a human: model-driven login/send throw until `unlock()`. */
   lockSession(reason = 'fullme') {
+    this.touch()
     this.lock = { reason, since: this.now().toISOString() }
+    this.note(`人工接管：${reason}（模型操作已暂停）`)
     return this.lock
   }
 
   unlock() {
+    if (this.lock) this.note('人工接管结束，模型可以继续')
     this.lock = null
+    // A human staring at a captcha is activity, not idleness: restart the clock
+    // so the first tick after handing back does not log the character out.
+    this.touch()
   }
 
   /** Credentials are read fresh on every login, so a rotated password applies. */
@@ -126,6 +149,12 @@ export class MudSession {
 
   log(kind, text) {
     this.transcript?.line(kind, text)
+  }
+
+  /** Record one panel-visible event (connect, idle, lock, ...). */
+  note(text) {
+    this.journal.record('event', text)
+    this.log('--', text)
   }
 
   sendRaw(bytes) {
@@ -154,6 +183,8 @@ export class MudSession {
   /** Called by the watchdog; exposed so it can be driven directly in tests. */
   checkIdle() {
     if (!this.connected) return false
+    // 0 disables the watchdog entirely (documented as such).
+    if (!(this.idleTimeoutMs > 0)) return false
     // A human at the captcha is activity, not idleness: never hang up on them.
     if (this.lock) return false
     const idle = Date.now() - this.lastActivity
@@ -167,24 +198,33 @@ export class MudSession {
     const secs = Math.round(idle / 1000)
     this.lastIdleLogout = this.now().toISOString()
     this.append(`\n>>> [idle] 已有 ${secs} 秒没有操作，自动 save + quit 下线。\n`, { log: true })
+    this.note(`闲置 ${secs} 秒，自动 save + quit`)
     this.sendRaw(Buffer.from('save\nquit\n', 'utf8'))
-    const timer = setTimeout(() => {
+    const socket = this.socket
+    this.closeTimer = setTimeout(() => {
+      this.closeTimer = null
+      // Only the socket we decided to quit is ours to destroy: a reconnect in
+      // the grace window must not be killed by an old idle logout.
+      if (this.socket !== socket) return
       try {
-        this.socket?.destroy()
+        socket?.destroy()
       } catch {
         /* ignore */
       }
       this.connected = false
       this.append('>>> [idle] 连接已关闭。\n', { log: true })
     }, this.closeDelayMs)
-    if (timer.unref) timer.unref()
+    if (this.closeTimer.unref) this.closeTimer.unref()
   }
 
   /** Append decoded server text to the read buffer. */
   append(text, { log = false } = {}) {
     if (!text) return
     this.buffer += text
-    if (log) this.log('<<', text)
+    if (log) {
+      this.log('<<', text)
+      this.journal.record('server', text)
+    }
     if (detectFullme(text)) {
       this.needsHuman = { kind: 'fullme', since: this.now().toISOString() }
       this.log('!!', 'fullme captcha waiting for a human')
@@ -207,6 +247,14 @@ export class MudSession {
 
   async connect() {
     if (this.socket && !this.socket.destroyed && this.connected) return
+    if (this.connecting) return this.connecting
+    this.connecting = this.openSocket().finally(() => {
+      this.connecting = null
+    })
+    return this.connecting
+  }
+
+  async openSocket() {
     const address = await this.resolveAddress(this.host, this.fallbackAddresses)
     this.resolvedHost = address
     const socket = this.createConnection({ host: address, port: this.port })
@@ -218,11 +266,19 @@ export class MudSession {
     this.error = null
 
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('connect timeout')), this.connectTimeoutMs)
+      const timer = setTimeout(() => {
+        try {
+          socket.destroy()
+        } catch {
+          /* ignore */
+        }
+        reject(new Error('connect timeout'))
+      }, this.connectTimeoutMs)
       socket.on('data', (chunk) => this.onData(chunk))
       socket.once('connect', () => {
         clearTimeout(timer)
         this.connected = true
+        this.note(`已连接 ${address}:${this.port}`)
         this.startIdleWatch()
         resolve()
       })
@@ -233,8 +289,15 @@ export class MudSession {
         reject(error)
       })
       socket.on('close', () => {
+        if (this.connected) this.note('连接已断开')
         this.connected = false
         this.clearIdleWatch()
+        // A dropped socket must not leave a human handoff (and its lock) behind:
+        // the captcha is gone with the connection, so hand the session back.
+        const hadLock = this.lock !== null
+        this.lock = null
+        this.onDisconnect?.()
+        if (hadLock) this.note('连接断开，人工接管已自动解除')
       })
     })
   }
@@ -248,8 +311,13 @@ export class MudSession {
   }
 
   /** Answer login prompts until the server goes quiet. */
-  async login({ timeoutMs = 60_000, quietMs = 6_000 } = {}) {
+  login(options = {}) {
+    return this.serialize(() => this.loginNow(options))
+  }
+
+  async loginNow({ timeoutMs = 60_000, quietMs = 6_000 } = {}) {
     this.assertUnlocked()
+    this.touch()
     await this.connect()
     const creds = this.credentials()
     const deadline = Date.now() + timeoutMs
@@ -264,6 +332,7 @@ export class MudSession {
       if (prompt) {
         this.cursor = prompt.end
         this.log('>>', prompt.key === 'password' ? '******' : prompt.value)
+        this.journal.record('agent', prompt.key === 'password' ? '******' : prompt.value, { actor: 'login' })
         this.sendRaw(Buffer.from(`${prompt.value}\n`, 'utf8'))
         // Echo the masked value back into the read buffer, like a client would.
         this.buffer += `\n>>> ${prompt.key === 'password' ? '******' : prompt.value}\n`
@@ -290,10 +359,16 @@ export class MudSession {
   }
 
   /** Type one line and collect output until the stream goes quiet. */
-  async send(text, { quietMs = 1200, maxMs = 15_000, bypassLock = false } = {}) {
+  send(text, options = {}) {
+    return this.serialize(() => this.sendNow(text, options))
+  }
+
+  async sendNow(text, { quietMs = 1200, maxMs = 15_000, bypassLock = false, actor = 'model' } = {}) {
     if (typeof text !== 'string' || text === '') throw new Error('mud: "text" must be a non-empty string')
     this.assertUnlocked(bypassLock)
+    this.touch()
     this.log('>>', text)
+    this.journal.record('agent', text, { actor })
     if (/^fullme\s+\S+/i.test(text)) this.needsHuman = null
     this.sendRaw(Buffer.from(`${text}\n`, 'utf8'))
 
@@ -331,6 +406,12 @@ export class MudSession {
 
   close() {
     this.clearIdleWatch()
+    if (this.closeTimer) {
+      clearTimeout(this.closeTimer)
+      this.closeTimer = null
+    }
+    this.lock = null
+    this.onDisconnect?.()
     try {
       this.socket?.destroy()
     } catch {
