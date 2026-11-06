@@ -2,7 +2,7 @@
 
 # 🐱 dsh-tool-mud
 
-**把北大侠客行装进 DeepSeek Harness：一条常驻 telnet 会话，一块给人看的面板。**
+**把北大侠客行（pkuxkx）装进 DeepSeek Harness：一条常驻 telnet 会话，一块给人看的面板。**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-339933.svg)
@@ -10,6 +10,9 @@
 ![tests](https://img.shields.io/badge/tests-67%20passing-2ea44f.svg)
 
 `mud` 工具 + 右侧栏面板 · 只做终端，不做代练 · 验证码交给人类
+
+**专为 [北大侠客行（pkuxkx）](http://www.pkuxkx.net) 调试** —— 不是通用 MUD 客户端，
+登录提示、fullme 验证码、看门狗节奏都是照着这一台服务器写的。
 
 </div>
 
@@ -34,6 +37,25 @@
 > **为什么只自动化两件事？**
 > 登录要填密码，闲置要下线，这两个不做就是纯粹的人肉折磨；其余每一步都是玩法判断，
 > 属于调用方。插件是手柄，不是代练。
+
+---
+
+## 🎯 为什么是 pkuxkx 专用
+
+这个插件不是"通用 telnet 客户端 + 配置文件"，而是**贴着这一台服务器**写的。
+下面这些都不是巧合，是踩出来的：
+
+| 地方 | 为什么这么写 |
+|---|---|
+| `mud.pkuxkx.net:8080` | 官方入口；本机 `getaddrinfo` 会间歇 `ENOTFOUND`，所以额外用 `dns.resolve4` 绕开，兜底 `47.110.45.145` |
+| 登录菜单选 `2`（UTF-8） | 服务器开场就问 `Input 1 for GBK, 2 for UTF8, 3 for BIG5`，选错就是乱码 |
+| `您的英文名字：` / `请输入您的密码：` | 登录提示表就是这两句中文，按**出现位置**匹配，不是按表顺序 |
+| `fullme.pkuxkx.net/robot.php?filename=…` | 验证码的出题接口；图片在 `b2evo_captcha_tmp/*.jpg`，**只认这一套** |
+| 闲置 3 分钟 `save` + `quit` | pkuxkx 一个角色只允许一条连接，挂着不退出会把下一次登录顶掉 |
+| 中文界面、`>>> [needs-human]` | 面板和提示语都是中文，因为玩的就是中文 MUD |
+
+换一台 MUD 不是改配置就能跑：`src/prompts.js` 的提示表、`src/fullme.js` 的取图逻辑、
+`src/session.js` 里 `save`/`quit` 的看门狗，都得跟着换。
 
 ---
 
@@ -239,6 +261,8 @@ DSH_HOME=/tmp/dsh-scratch dsh web --port 3099
 - **`panelRoutePrefix` 写死在浏览器半**：改了主机端前缀，得同步改 `client/index.js` 里的 `ENDPOINT`。
 - **转录是一条顺序流**：`journal` 只保留最近 500 条，长期记录看日志文件。
 - **没有内置的“自动玩法”**：路线、任务、战斗判断属于调用方。
+- **只对 pkuxkx 负责**：提示语、fullme 接口、`save`/`quit` 都是这台服务器的规矩；
+  换 MUD 要改 `prompts.js` / `fullme.js` / `session.js`，不是改配置。
 
 ---
 
