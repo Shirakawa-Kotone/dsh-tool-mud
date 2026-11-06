@@ -12,7 +12,9 @@
   "files": [
     "src",
     "client",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "cordis.patch.example.yml"
   ],
   "scripts": {
     "test": "node --test test/"
@@ -39,5 +41,13 @@
     "client": {
       "platform": "web"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shirakawa-Kotone/dsh-tool-mud.git"
+  },
+  "homepage": "https://github.com/Shirakawa-Kotone/dsh-tool-mud#readme",
+  "bugs": {
+    "url": "https://github.com/Shirakawa-Kotone/dsh-tool-mud/issues"
   }
 }
