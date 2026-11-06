@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-339933.svg)
 ![DSH](https://img.shields.io/badge/dsh-0.2.x-4f7cff.svg)
-![tests](https://img.shields.io/badge/tests-67%20passing-2ea44f.svg)
+![tests](https://img.shields.io/badge/tests-offline-2ea44f.svg)
 
 `mud` 工具 + 右侧栏面板 · 只做终端，不做代练 · 验证码交给人类
 
@@ -27,7 +27,7 @@
 | 闲置 3 分钟自动 `save` + `quit` | fullme 验证码点一下，接管会话 |
 
 ```jsonc
-{ "action": "login" }               // 连接 + 唯一自动的部分：填 id / password
+{ "action": "login" }               // 连接 + 唯一自动的部分：选 UTF-8、填 id / password
 { "action": "send", "text": "hp" }  // 敲一行，返回新输出
 { "action": "read" }                // 只返回上次之后的新输出
 { "action": "status" }              // 连接 / 闲置倒计时 / 人工接管 / fullme
@@ -85,7 +85,7 @@
 | **下一步** | 你指定的计划文件末尾 | `planPath` |
 | **日记** | 你指定的日记文件末尾 | `diaryPath` |
 
-面板是**纯只读视图**：除了 fullme 的四个按钮，它不向游戏发任何东西。
+面板是**纯只读视图**：除了 fullme 的三个按钮（开始 / 提交 / 取消），它不向游戏发任何东西。
 
 ---
 
@@ -134,13 +134,20 @@ sequenceDiagram
 ln -sfn /path/to/dsh-tool-mud ~/.dsh/profiles/web/node_modules/dsh-tool-mud
 ```
 
+```bash
+# 2) 准备账号文件（插件不会自动 chmod，自己收好权限）
+mkdir -p ~/.dsh-tool-mud
+printf '{"id":"你的英文名","password":"你的密码"}' > ~/.dsh-tool-mud/creds.json
+chmod 600 ~/.dsh-tool-mud/creds.json
+```
+
 ```yaml
-# 2) ~/.dsh/profiles/web/cordis.patch.yml
+# 3) ~/.dsh/profiles/web/cordis.patch.yml
 - insert:
     - id: tool-mud
       name: 'dsh-tool-mud'
       config:
-        credentialsPath: ~/.dsh-tool-mud/creds.json   # { "id": "…", "password": "…" }，600
+        credentialsPath: ~/.dsh-tool-mud/creds.json   # { "id": "…", "password": "…" }
         logDir: ~/.dsh-tool-mud/logs
         planPath: ~/notes/PROGRESS.md                 # 可选：面板「下一步」
         diaryPath: ~/notes/DIARY.md                   # 可选：面板「日记」
@@ -163,10 +170,12 @@ ln -sfn /path/to/dsh-tool-mud ~/.dsh/profiles/web/node_modules/dsh-tool-mud
 | `credentialsPath` | `~/.dsh-tool-mud/creds.json` | 账号文件，`{ "id", "password" }` |
 | `logDir` | `~/.dsh-tool-mud/logs` | 每日转录 `mud-YYYY-MM-DD.log`；空串关闭 |
 | `fallbackAddresses` | `["47.110.45.145"]` | DNS 失败时的兜底地址（本机 getaddrinfo 会间歇 `ENOTFOUND`） |
-| `idleTimeoutMs` | `180000` | 无工具调用多久后下线；**`0` 关闭看门狗** |
+| `idleTimeoutMs` | `180000` | 无工具调用多久后下线；**`0` 关闭看门狗**（`status` 报 `watchdog: false`，面板显示“看门狗关闭”） |
 | `panelRoutePrefix` | `/dsh-tool-mud` | 面板端点前缀（与浏览器半一致，改则两边都改） |
 | `planPath` | `""` | 「下一步」页的文件；空则隐藏 |
 | `diaryPath` | `""` | 「日记」页的文件；空则隐藏 |
+
+路径类配置都接受 `~/` 前缀，会用 `os.homedir()` 展开。
 
 ---
 
@@ -177,7 +186,7 @@ ln -sfn /path/to/dsh-tool-mud ~/.dsh/profiles/web/node_modules/dsh-tool-mud
 | 方法 | 路径 | 作用 |
 |---|---|---|
 | `GET` | `/dsh-tool-mud/status` | 连接 / 闲置 / 接管 / fullme 状态 |
-| `GET` | `/dsh-tool-mud/journal?since=N` | 游标之后的事件（`seq` 单调递增） |
+| `GET` | `/dsh-tool-mud/journal?since=N` | 游标之后的事件（`seq` 单调递增，`dropped: true` 表示跌出了环缓冲） |
 | `GET` | `/dsh-tool-mud/notes` | 计划与日记的文件尾部 |
 | `POST` | `/dsh-tool-mud/fullme/start` | 出题 + 取图 + 上锁 |
 | `POST` | `/dsh-tool-mud/fullme/submit` | `{ "answer": "自己" }` |
@@ -240,8 +249,10 @@ client/
 ## 开发
 
 ```bash
-node --test test/          # 67 个用例，全部离线（假 socket），约 0.4s
+node --test test/          # 83 个用例，全部离线（假 socket / 假 fetch），约 0.6s
 ```
+
+`test/wiring.test.js` 需要 DSH 运行时的 `@deepseek-ai/dsh-tools`；裸克隆里没有 `node_modules` 时这 9 个用例会自动跳过，其余照常。
 
 测试不碰真服务器，所以**跑测试不会抢占线上会话**。本地调试同理：别在线上那条连接活着时 `login`，
 同一个角色只允许一条连接，新连会把正在玩的踢下线。
@@ -259,7 +270,8 @@ DSH_HOME=/tmp/dsh-scratch dsh web --port 3099
 
 - **一条连接一个角色**：插件假设单会话；并发登录会被服务器踢掉（这不是 bug，是 MUD 的规矩）。
 - **`panelRoutePrefix` 写死在浏览器半**：改了主机端前缀，得同步改 `client/index.js` 里的 `ENDPOINT`。
-- **转录是一条顺序流**：`journal` 只保留最近 500 条，长期记录看日志文件。
+- **转录是一条顺序流**：`journal` 只保留最近 500 条，落后太久会收到 `dropped: true`，长期记录看日志文件。
+- **notes 只读尾部**：每次最多读 6000 字（按 mtime 缓存），不是全文。
 - **没有内置的“自动玩法”**：路线、任务、战斗判断属于调用方。
 - **只对 pkuxkx 负责**：提示语、fullme 接口、`save`/`quit` 都是这台服务器的规矩；
   换 MUD 要改 `prompts.js` / `fullme.js` / `session.js`，不是改配置。
