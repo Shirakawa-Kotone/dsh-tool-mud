@@ -4,18 +4,36 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { apply, Config, inject, name } from '../src/index.js'
 
-function fakeContext() {
+function fakeContext({ withWebServer = true } = {}) {
   const registered = []
+  const routes = []
   const disposers = []
-  return {
+  const ctx = {
     registered,
+    routes,
     tools: { register: (tool) => registered.push(tool) },
     effect: (factory) => {
       const dispose = factory()
       if (typeof dispose === 'function') disposers.push(dispose)
     },
+    // Mimic cordis: the child callback runs immediately when the service is present.
+    inject: (names, callback) => {
+      if (names.includes('webServer') && withWebServer) callback(ctx)
+    },
     dispose: () => disposers.forEach((fn) => fn()),
   }
+  if (withWebServer) {
+    ctx.webServer = {
+      register: (route) => {
+        routes.push(route)
+        return () => {
+          const at = routes.indexOf(route)
+          if (at !== -1) routes.splice(at, 1)
+        }
+      },
+    }
+  }
+  return ctx
 }
 
 const config = {
@@ -44,6 +62,25 @@ test('loading the plugin opens no socket', () => {
   assert.equal(ctx.registered[0].name, 'mud')
   // Nothing observable happened: no connection was attempted at import/apply time.
   assert.equal(typeof ctx.dispose, 'function')
+})
+
+test('registers the four fullme panel routes on a composed webserver', () => {
+  const ctx = fakeContext()
+  apply(ctx, config)
+  assert.deepEqual(ctx.routes.map((route) => route.path).sort(), [
+    '/dsh-tool-mud/fullme/cancel',
+    '/dsh-tool-mud/fullme/start',
+    '/dsh-tool-mud/fullme/status',
+    '/dsh-tool-mud/fullme/submit',
+  ])
+  assert.ok(ctx.routes.every((route) => route.kind === 'exact'))
+})
+
+test('a headless host gets the tool but no routes', () => {
+  const ctx = fakeContext({ withWebServer: false })
+  apply(ctx, config)
+  assert.equal(ctx.registered.length, 1)
+  assert.equal(ctx.routes.length, 0)
 })
 
 test('the status action answers without a connection', async () => {

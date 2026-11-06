@@ -100,6 +100,19 @@ export class MudSession {
     this.lastIdleLogout = null
     /** @type {null | {kind: 'fullme', since: string}} */
     this.needsHuman = null
+    /** Set while a human drives the session (a fullme captcha); the tool refuses model calls. */
+    /** @type {null | {reason: string, since: string}} */
+    this.lock = null
+  }
+
+  /** Hand the session to a human: model-driven login/send throw until `unlock()`. */
+  lockSession(reason = 'fullme') {
+    this.lock = { reason, since: this.now().toISOString() }
+    return this.lock
+  }
+
+  unlock() {
+    this.lock = null
   }
 
   /** Credentials are read fresh on every login, so a rotated password applies. */
@@ -141,6 +154,8 @@ export class MudSession {
   /** Called by the watchdog; exposed so it can be driven directly in tests. */
   checkIdle() {
     if (!this.connected) return false
+    // A human at the captcha is activity, not idleness: never hang up on them.
+    if (this.lock) return false
     const idle = Date.now() - this.lastActivity
     if (idle < this.idleTimeoutMs) return false
     this.idleLogout(idle)
@@ -234,6 +249,7 @@ export class MudSession {
 
   /** Answer login prompts until the server goes quiet. */
   async login({ timeoutMs = 60_000, quietMs = 6_000 } = {}) {
+    this.assertUnlocked()
     await this.connect()
     const creds = this.credentials()
     const deadline = Date.now() + timeoutMs
@@ -260,9 +276,23 @@ export class MudSession {
     return this.take()
   }
 
+  /**
+   * Throw while a human owns the session. `bypassLock` exists for exactly one
+   * caller: the fullme flow, which is that human's own action.
+   */
+  assertUnlocked(bypassLock = false) {
+    if (this.lock && !bypassLock) {
+      throw new Error(
+        `mud: 会话已被人工接管（${this.lock.reason}，自 ${this.lock.since}），模型操作已暂停；`
+        + '请在 MUD 面板里完成验证码，或取消接管。',
+      )
+    }
+  }
+
   /** Type one line and collect output until the stream goes quiet. */
-  async send(text, { quietMs = 1200, maxMs = 15_000 } = {}) {
+  async send(text, { quietMs = 1200, maxMs = 15_000, bypassLock = false } = {}) {
     if (typeof text !== 'string' || text === '') throw new Error('mud: "text" must be a non-empty string')
+    this.assertUnlocked(bypassLock)
     this.log('>>', text)
     if (/^fullme\s+\S+/i.test(text)) this.needsHuman = null
     this.sendRaw(Buffer.from(`${text}\n`, 'utf8'))
@@ -295,6 +325,7 @@ export class MudSession {
       idleLogoutInMs: this.connected ? Math.max(0, this.idleTimeoutMs - idleFor) : null,
       lastIdleLogout: this.lastIdleLogout,
       needsHuman: this.needsHuman,
+      lock: this.lock,
     }
   }
 

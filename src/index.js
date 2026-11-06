@@ -9,6 +9,8 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEFAULT_IDLE_MS, MudSession } from './session.js'
+import { FullmeFlow } from './fullme.js'
+import { createFullmeRoutes } from './routes.js'
 
 export const name = 'tool-mud'
 export const inject = ['tools']
@@ -29,6 +31,8 @@ export const Config = z.object({
     .description('Addresses tried in order when DNS resolution fails.'),
   idleTimeoutMs: z.number().step(1).min(0).default(DEFAULT_IDLE_MS)
     .description('Idle time before the session saves and quits itself; 0 disables the watchdog.'),
+  fullmeRoutePrefix: z.string().default('/dsh-tool-mud/fullme')
+    .description('Base path of the manual fullme panel endpoints, served when a webServer is composed.'),
 })
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -62,6 +66,22 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.effect(() => () => session.close())
+
+  const flow = new FullmeFlow({ session })
+  const routePrefix = config.fullmeRoutePrefix ?? '/dsh-tool-mud/fullme'
+  const routeDisposers = []
+
+  // The panel routes exist only where a browser-facing webserver is composed;
+  // a headless host still gets the tool, just no panel.
+  ctx.inject(['webServer'], (child) => {
+    child.effect(() => {
+      const routes = createFullmeRoutes({ flow, prefix: routePrefix })
+      for (const route of routes) routeDisposers.push(child.webServer.register(route))
+      return () => {
+        while (routeDisposers.length) routeDisposers.pop()()
+      }
+    })
+  })
 
   const toolName = config.toolName ?? 'mud'
 

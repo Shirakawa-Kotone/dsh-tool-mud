@@ -92,6 +92,24 @@ test('flags a fullme captcha and clears the flag once it is submitted', async ()
   assert.equal(session.status().needsHuman, null)
 })
 
+test('a session held by a human refuses model commands', async () => {
+  const { session, socket } = await connected()
+  session.lockSession('fullme')
+
+  await assert.rejects(() => session.send('hp'), /人工接管/)
+  await assert.rejects(() => session.login(), /人工接管/)
+  assert.equal(socket.writes.length, 0)
+  assert.equal(session.status().lock.reason, 'fullme')
+
+  // The fullme flow itself is the human's own action and may bypass the lock.
+  socket.on('written', (line) => {
+    if (line.trim() === 'fullme') delay(() => socket.emit('data', Buffer.from('x\r\n')), 2)
+  })
+  await session.send('fullme', { quietMs: 20, bypassLock: true })
+  session.unlock()
+  assert.equal(session.status().lock, null)
+})
+
 test('idle logout sends save + quit and hangs up', async () => {
   const { session, socket } = await connected({ idleTimeoutMs: 1000 })
   session.lastActivity = Date.now() - 5000
@@ -103,6 +121,15 @@ test('idle logout sends save + quit and hangs up', async () => {
   assert.equal(socket.destroyed, true)
   assert.equal(session.status().connected, false)
   assert.ok(session.status().lastIdleLogout)
+})
+
+test('a human-held session is never idle-logged-out', async () => {
+  const { session, socket } = await connected({ idleTimeoutMs: 10 })
+  session.lockSession('fullme')
+  session.lastActivity = Date.now() - 60_000
+
+  assert.equal(session.checkIdle(), false)
+  assert.equal(socket.destroyed, false)
 })
 
 test('does not disconnect while the session is being used', async () => {
