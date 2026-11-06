@@ -1,0 +1,17 @@
+> ⚠️ 改这个文件会触发 profile 热重载，正在跑的 telnet 会话会被重建。
+> 线上有人在玩的时候不要动；要试新版本，用下面的 `toolName: mud_dev` 并存。
+
+- insert:
+    - id: tool-mud
+      name: 'dsh-tool-mud'
+      config:
+        toolName: mud
+        host: mud.pkuxkx.net
+        port: 8080
+        encoding: utf-8
+        encodingMenu: '2'
+        credentialsPath: /Users/chen/dev/pkuxkx/agent-xkx/state/creds.json
+        logDir: /Users/chen/dev/pkuxkx/agent-xkx/logs
+        fallbackAddresses:
+          - 47.110.45.145
+        idleTimeoutMs: 180000

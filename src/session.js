@@ -1,0 +1,311 @@
+/**
+ * One long-lived MUD session: connect, log in, type a line, read what came back.
+ *
+ * The session owns no policy about *what* to type. The only things it does
+ * automatically are (a) answering the login prompts and (b) hanging up after the
+ * idle timeout, so an abandoned character never sits online.
+ */
+import dns from 'node:dns/promises'
+import fs from 'node:fs'
+import net from 'node:net'
+import { createTelnetStream, normalizeNewlines, stripAnsi } from './telnet.js'
+import { detectFullme, findLoginPrompt } from './prompts.js'
+import { createTranscript } from './transcript.js'
+
+export const DEFAULT_IDLE_MS = 180_000
+/** How often the idle watchdog wakes up. */
+export const IDLE_TICK_MS = 15_000
+/** Decoded characters kept before the oldest half is dropped. */
+export const MAX_BUFFER_CHARS = 200_000
+
+const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Resolve the server address, preferring c-ares over getaddrinfo.
+ *
+ * `net.connect({ host: name })` goes through the system resolver, which on some
+ * machines intermittently returns ENOTFOUND for this host even though DNS itself
+ * is fine. `dns.resolve4` bypasses getaddrinfo entirely, so ask it first and only
+ * then fall back to the pinned addresses.
+ *
+ * @param {string} host
+ * @param {string[]} fallbacks
+ * @returns {Promise<string>}
+ */
+export async function resolveAddress(host, fallbacks = []) {
+  try {
+    const list = await dns.resolve4(host)
+    if (list && list.length) return list[0]
+  } catch {
+    /* fall through */
+  }
+  if (fallbacks.length) return fallbacks[0]
+  throw new Error(`mud: cannot resolve ${host} and no fallback address is configured`)
+}
+
+export class MudSession {
+  /**
+   * @param {object} options
+   * @param {string} options.host
+   * @param {number} options.port
+   * @param {string} options.encoding
+   * @param {string} options.encodingMenu - menu key for the UTF-8 variant
+   * @param {string} options.credentialsPath
+   * @param {string} options.logDir
+   * @param {number} [options.idleTimeoutMs]
+   * @param {number} [options.idleTickMs]
+   * @param {number} [options.connectTimeoutMs]
+   * @param {number} [options.closeDelayMs] - grace period between `quit` and socket teardown
+   * @param {number} [options.pollMs] - how long to wait between buffer checks
+   * @param {number} [options.maxBufferChars]
+   * @param {string[]} [options.fallbackAddresses]
+   * @param {typeof net.createConnection} [options.createConnection]
+   * @param {(host: string, fallbacks: string[]) => Promise<string>} [options.resolveAddress]
+   * @param {(ms: number) => Promise<void>} [options.sleep]
+   * @param {() => Date} [options.now]
+   */
+  constructor(options) {
+    this.host = options.host
+    this.port = options.port
+    this.encoding = options.encoding ?? 'utf-8'
+    this.encodingMenu = options.encodingMenu ?? '2'
+    this.credentialsPath = options.credentialsPath
+    this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_MS
+    this.idleTickMs = options.idleTickMs ?? IDLE_TICK_MS
+    this.connectTimeoutMs = options.connectTimeoutMs ?? 20_000
+    this.closeDelayMs = options.closeDelayMs ?? 2_000
+    this.pollMs = options.pollMs ?? 200
+    this.maxBufferChars = options.maxBufferChars ?? MAX_BUFFER_CHARS
+    this.fallbackAddresses = options.fallbackAddresses ?? []
+
+    this.createConnection = options.createConnection ?? net.createConnection
+    this.resolveAddress = options.resolveAddress
+      ?? ((host, fallbacks) => resolveAddress(host, fallbacks))
+    this.sleep = options.sleep ?? realSleep
+    this.now = options.now ?? (() => new Date())
+
+    this.transcript = options.logDir ? createTranscript({ dir: options.logDir, now: this.now }) : null
+
+    this.socket = null
+    this.telnet = null
+    this.decoder = null
+    this.ansiCarry = ''
+    this.buffer = ''
+    this.cursor = 0
+    this.connected = false
+    this.error = null
+    this.resolvedHost = null
+    this.lastActivity = 0
+    this.idleTimer = null
+    this.lastIdleLogout = null
+    /** @type {null | {kind: 'fullme', since: string}} */
+    this.needsHuman = null
+  }
+
+  /** Credentials are read fresh on every login, so a rotated password applies. */
+  credentials() {
+    try {
+      return JSON.parse(fs.readFileSync(this.credentialsPath, 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+
+  log(kind, text) {
+    this.transcript?.line(kind, text)
+  }
+
+  sendRaw(bytes) {
+    if (this.socket && !this.socket.destroyed) this.socket.write(bytes)
+  }
+
+  /** Mark the session as actively driven (called on every tool call). */
+  touch() {
+    this.lastActivity = Date.now()
+  }
+
+  clearIdleWatch() {
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer)
+      this.idleTimer = null
+    }
+  }
+
+  startIdleWatch() {
+    this.clearIdleWatch()
+    this.touch()
+    this.idleTimer = setInterval(() => this.checkIdle(), this.idleTickMs)
+    if (this.idleTimer.unref) this.idleTimer.unref()
+  }
+
+  /** Called by the watchdog; exposed so it can be driven directly in tests. */
+  checkIdle() {
+    if (!this.connected) return false
+    const idle = Date.now() - this.lastActivity
+    if (idle < this.idleTimeoutMs) return false
+    this.idleLogout(idle)
+    return true
+  }
+
+  idleLogout(idle) {
+    this.clearIdleWatch()
+    const secs = Math.round(idle / 1000)
+    this.lastIdleLogout = this.now().toISOString()
+    this.append(`\n>>> [idle] 已有 ${secs} 秒没有操作，自动 save + quit 下线。\n`, { log: true })
+    this.sendRaw(Buffer.from('save\nquit\n', 'utf8'))
+    const timer = setTimeout(() => {
+      try {
+        this.socket?.destroy()
+      } catch {
+        /* ignore */
+      }
+      this.connected = false
+      this.append('>>> [idle] 连接已关闭。\n', { log: true })
+    }, this.closeDelayMs)
+    if (timer.unref) timer.unref()
+  }
+
+  /** Append decoded server text to the read buffer. */
+  append(text, { log = false } = {}) {
+    if (!text) return
+    this.buffer += text
+    if (log) this.log('<<', text)
+    if (detectFullme(text)) {
+      this.needsHuman = { kind: 'fullme', since: this.now().toISOString() }
+      this.log('!!', 'fullme captcha waiting for a human')
+    }
+    if (this.buffer.length > this.maxBufferChars) {
+      const cut = this.buffer.length - Math.floor(this.maxBufferChars / 2)
+      this.buffer = this.buffer.slice(cut)
+      this.cursor = Math.max(0, this.cursor - cut)
+    }
+  }
+
+  onData(chunk) {
+    const clean = this.telnet.push(chunk)
+    if (!clean.length) return
+    const decoded = this.decoder.decode(clean, { stream: true })
+    const { text, carry } = stripAnsi(this.ansiCarry + decoded)
+    this.ansiCarry = carry
+    if (text) this.append(normalizeNewlines(text), { log: true })
+  }
+
+  async connect() {
+    if (this.socket && !this.socket.destroyed && this.connected) return
+    const address = await this.resolveAddress(this.host, this.fallbackAddresses)
+    this.resolvedHost = address
+    const socket = this.createConnection({ host: address, port: this.port })
+
+    this.socket = socket
+    this.decoder = new TextDecoder(this.encoding)
+    this.telnet = createTelnetStream({ reply: (bytes) => this.sendRaw(bytes) })
+    this.ansiCarry = ''
+    this.error = null
+
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('connect timeout')), this.connectTimeoutMs)
+      socket.on('data', (chunk) => this.onData(chunk))
+      socket.once('connect', () => {
+        clearTimeout(timer)
+        this.connected = true
+        this.startIdleWatch()
+        resolve()
+      })
+      socket.on('error', (error) => {
+        clearTimeout(timer)
+        this.error = String(error)
+        this.connected = false
+        reject(error)
+      })
+      socket.on('close', () => {
+        this.connected = false
+        this.clearIdleWatch()
+      })
+    })
+  }
+
+  /** Pop everything the caller has not read yet. */
+  take() {
+    const text = this.buffer
+    this.buffer = ''
+    this.cursor = 0
+    return text
+  }
+
+  /** Answer login prompts until the server goes quiet. */
+  async login({ timeoutMs = 60_000, quietMs = 6_000 } = {}) {
+    await this.connect()
+    const creds = this.credentials()
+    const deadline = Date.now() + timeoutMs
+    let quietSince = Date.now()
+    let seenAny = false
+
+    while (Date.now() < deadline) {
+      await this.sleep(this.pollMs)
+      const prompt = findLoginPrompt(this.buffer, this.cursor, creds, {
+        encodingMenu: this.encodingMenu,
+      })
+      if (prompt) {
+        this.cursor = prompt.end
+        this.log('>>', prompt.key === 'password' ? '******' : prompt.value)
+        this.sendRaw(Buffer.from(`${prompt.value}\n`, 'utf8'))
+        // Echo the masked value back into the read buffer, like a client would.
+        this.buffer += `\n>>> ${prompt.key === 'password' ? '******' : prompt.value}\n`
+        quietSince = Date.now()
+        seenAny = true
+        continue
+      }
+      if (seenAny && Date.now() - quietSince > quietMs) break
+    }
+    return this.take()
+  }
+
+  /** Type one line and collect output until the stream goes quiet. */
+  async send(text, { quietMs = 1200, maxMs = 15_000 } = {}) {
+    if (typeof text !== 'string' || text === '') throw new Error('mud: "text" must be a non-empty string')
+    this.log('>>', text)
+    if (/^fullme\s+\S+/i.test(text)) this.needsHuman = null
+    this.sendRaw(Buffer.from(`${text}\n`, 'utf8'))
+
+    const start = Date.now()
+    let lastLength = this.buffer.length
+    let quietAt = Date.now()
+
+    while (Date.now() - start < maxMs) {
+      await this.sleep(this.pollMs)
+      if (this.buffer.length !== lastLength) {
+        lastLength = this.buffer.length
+        quietAt = Date.now()
+      } else if (Date.now() - quietAt > quietMs) {
+        break
+      }
+    }
+    return this.take()
+  }
+
+  status() {
+    const idleFor = this.lastActivity ? Date.now() - this.lastActivity : 0
+    return {
+      connected: this.connected,
+      buffered: this.buffer.length,
+      error: this.error,
+      host: this.resolvedHost,
+      idleTimeoutMs: this.idleTimeoutMs,
+      idleForMs: idleFor,
+      idleLogoutInMs: this.connected ? Math.max(0, this.idleTimeoutMs - idleFor) : null,
+      lastIdleLogout: this.lastIdleLogout,
+      needsHuman: this.needsHuman,
+    }
+  }
+
+  close() {
+    this.clearIdleWatch()
+    try {
+      this.socket?.destroy()
+    } catch {
+      /* ignore */
+    }
+    this.connected = false
+    this.transcript?.close()
+  }
+}
