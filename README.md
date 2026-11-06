@@ -129,6 +129,9 @@ sequenceDiagram
 
 插件是标准 cordis 插件包：主机半 + `dsh.client` 声明的浏览器半（手写、无需构建）。
 
+> 🤖 **给 agent 的版本**：`AGENTS.md` 是一份逐步的配置/验证/排障指南（含禁令与故障对照表），
+> 比这一节更适合让另一个 agent 照着做。
+
 ```bash
 # 1) 链进 profile
 ln -sfn /path/to/dsh-tool-mud ~/.dsh/profiles/web/node_modules/dsh-tool-mud

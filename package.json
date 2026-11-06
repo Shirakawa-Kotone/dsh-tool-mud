@@ -12,6 +12,7 @@
   "files": [
     "src",
     "client",
+    "AGENTS.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
