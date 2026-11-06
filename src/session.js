@@ -305,6 +305,8 @@ export class MudSession {
         // the captcha is gone with the connection, so hand the session back.
         const hadLock = this.lock !== null
         this.lock = null
+        // The prompt that asked for a human is gone with the connection.
+        this.needsHuman = null
         if (unexpected) this.onDisconnect?.()
         if (hadLock) this.note('连接断开，人工接管已自动解除')
       })

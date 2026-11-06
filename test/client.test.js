@@ -65,6 +65,10 @@ test('apply registers the tab type, the tab body and the header button', () => {
 
   assert.equal(ctx.tabType.id, 'dsh-tool-mud')
   assert.equal(ctx.tabType.kind, 'mud-panel')
+  // Switching tabs must not unmount the feed (cursor, scroll, typed answer).
+  assert.equal(ctx.tabType.keepMounted, true)
+  // Guide entries are sorted by `order`; a missing one yields NaN.
+  assert.equal(typeof ctx.tabType.guide[0].order, 'number')
   const seats = ctx.slotCalls.map((call) => call.options)
   assert.deepEqual(seats.sort(), ['conversation.session.header.utilities', 'sidebar.right.pane.tab'])
   // The body seat must be keyed by the definition id, not by the kind.

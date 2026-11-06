@@ -171,7 +171,6 @@ chmod 600 ~/.dsh-tool-mud/creds.json
 | `logDir` | `~/.dsh-tool-mud/logs` | 每日转录 `mud-YYYY-MM-DD.log`；空串关闭 |
 | `fallbackAddresses` | `["47.110.45.145"]` | DNS 失败时的兜底地址（本机 getaddrinfo 会间歇 `ENOTFOUND`） |
 | `idleTimeoutMs` | `180000` | 无工具调用多久后下线；**`0` 关闭看门狗**（`status` 报 `watchdog: false`，面板显示“看门狗关闭”） |
-| `panelRoutePrefix` | `/dsh-tool-mud` | 面板端点前缀（与浏览器半一致，改则两边都改） |
 | `planPath` | `""` | 「下一步」页的文件；空则隐藏 |
 | `diaryPath` | `""` | 「日记」页的文件；空则隐藏 |
 
@@ -269,7 +268,8 @@ DSH_HOME=/tmp/dsh-scratch dsh web --port 3099
 ## 已知限制
 
 - **一条连接一个角色**：插件假设单会话；并发登录会被服务器踢掉（这不是 bug，是 MUD 的规矩）。
-- **`panelRoutePrefix` 写死在浏览器半**：改了主机端前缀，得同步改 `client/index.js` 里的 `ENDPOINT`。
+- **面板前缀固定为 `/dsh-tool-mud`**：浏览器半硬编码了这个路径，所以它不做成配置项——
+  一个客户端学不到的配置只会把整块面板静默 404 掉。
 - **转录是一条顺序流**：`journal` 只保留最近 500 条，落后太久会收到 `dropped: true`，长期记录看日志文件。
 - **notes 只读尾部**：每次最多读 6000 字（按 mtime 缓存），不是全文。
 - **没有内置的“自动玩法”**：路线、任务、战斗判断属于调用方。

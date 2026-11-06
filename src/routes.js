@@ -15,6 +15,13 @@
 
 const MAX_BODY_BYTES = 4096
 
+/**
+ * The one place the panel prefix is decided. The browser bundle hardcodes the
+ * same string, so this is deliberately NOT a config knob: a prefix the client
+ * cannot learn would silently 404 the whole panel.
+ */
+export const PANEL_PREFIX = '/dsh-tool-mud'
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
@@ -48,7 +55,7 @@ function query(req) {
  * @param {import('./session.js').MudSession} options.session
  * @param {string} [options.prefix]
  */
-export function createPanelRoutes({ flow, journal, notes, session, prefix = '/dsh-tool-mud' }) {
+export function createPanelRoutes({ flow, journal, notes, session, prefix = PANEL_PREFIX }) {
   const status = {
     kind: 'exact',
     path: `${prefix}/status`,

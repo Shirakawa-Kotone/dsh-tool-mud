@@ -58,6 +58,8 @@ export class FullmeFlow {
     this.pending = null
     /** In-flight start(), so a double click cannot open two challenges. */
     this.starting = null
+    /** Bumped by abort(): a challenge from an older connection is dead. */
+    this.generation = 0
     this.fetchTimeoutMs = 10_000
   }
 
@@ -85,6 +87,7 @@ export class FullmeFlow {
   }
 
   async startNow() {
+    const generation = this.generation
     if (!this.session.connected) await this.session.connect()
 
     this.session.lockSession('fullme')
@@ -135,6 +138,7 @@ export class FullmeFlow {
 
   /** The socket went away underneath us: drop the challenge, keep nothing stale. */
   abort() {
+    this.generation += 1
     this.pending = null
     this.session.unlock()
   }

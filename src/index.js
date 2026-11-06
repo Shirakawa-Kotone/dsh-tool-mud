@@ -40,8 +40,6 @@ export const Config = z.object({
     .description('Addresses tried in order when DNS resolution fails.'),
   idleTimeoutMs: z.number().step(1).min(0).default(DEFAULT_IDLE_MS)
     .description('Idle time before the session saves and quits itself; 0 disables the watchdog.'),
-  panelRoutePrefix: z.string().default('/dsh-tool-mud')
-    .description('Base path of the MUD panel endpoints, served when a webServer is composed.'),
   planPath: z.string().default('').description('File shown as the plan section; empty hides it.'),
   diaryPath: z.string().default('').description('File shown as the diary section; empty hides it.'),
 })
@@ -103,7 +101,7 @@ export function apply(ctx, config = {}) {
     planPath: expandHome(config.planPath ?? ''),
     diaryPath: expandHome(config.diaryPath ?? ''),
   })
-  const routePrefix = config.panelRoutePrefix ?? '/dsh-tool-mud'
+
 
   // The panel routes exist only where a browser-facing webserver is composed;
   // a headless host still gets the tool, just no panel.
@@ -114,7 +112,6 @@ export function apply(ctx, config = {}) {
         journal: session.journal,
         notes,
         session,
-        prefix: routePrefix,
       })
         .map((route) => child.webServer.register({ ...route, handler: fence(child, route.handler) }))
       return () => disposers.forEach((dispose) => dispose())

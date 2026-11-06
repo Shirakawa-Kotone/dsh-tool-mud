@@ -26,15 +26,32 @@ window.__ModuleLoader__.load({
     // with `<base href="./">`, so an absolute path breaks behind a path prefix.
     const ENDPOINT = 'dsh-tool-mud'
 
+    /** An error the user cannot fix by waiting: stop the poll chain on it. */
+    class FatalPanelError extends Error {}
+
     async function request(path, body) {
+      const init = {
+        // A hung request must not freeze a poll chain forever: the reschedule
+        // happens after the await, so without a timeout the panel just dies.
+        signal: AbortSignal.timeout(8000),
+        headers: { accept: 'application/json' },
+      }
       const response = body === undefined
-        ? await fetch(path, { headers: { accept: 'application/json' } })
+        ? await fetch(path, init)
         : await fetch(path, {
+          ...init,
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         })
-      if (response.status === 404) throw new Error('主机端没有响应（面板路由未注册）')
+      // The fence answers 401/403 as text/plain, so JSON parsing would report
+      // "non-JSON response" for the one error a reload actually fixes.
+      if (response.status === 401 || response.status === 403) {
+        throw new FatalPanelError('没有权限访问面板接口，请重新加载页面完成认证')
+      }
+      if (response.status === 404) {
+        throw new FatalPanelError('主机端没有响应（面板路由未注册）')
+      }
       try {
         return await response.json()
       } catch {
@@ -184,6 +201,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [answer, setAnswer] = React.useState('')
       const [output, setOutput] = React.useState('')
+      const [imageFailed, setImageFailed] = React.useState(false)
       const cursor = React.useRef(0)
       const scroller = React.useRef(null)
 
@@ -202,7 +220,9 @@ window.__ModuleLoader__.load({
             }
             setError(null)
           } catch (failure) {
-            if (alive) setError(String(failure.message ?? failure))
+            if (!alive) return
+            setError(String(failure.message ?? failure))
+            if (failure instanceof FatalPanelError) return
           }
           if (alive) journalTimer = setTimeout(pollJournal, 1000)
         }
@@ -215,7 +235,9 @@ window.__ModuleLoader__.load({
             setNotes(nextNotes)
             setError(null)
           } catch (failure) {
-            if (alive) setError(String(failure.message ?? failure))
+            if (!alive) return
+            setError(String(failure.message ?? failure))
+            if (failure instanceof FatalPanelError) return
           }
           if (alive) slowTimer = setTimeout(pollSlow, 3000)
         }
@@ -229,6 +251,9 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // A fresh challenge starts with a fresh image.
+      React.useEffect(() => { setImageFailed(false) }, [status?.imageUrl])
+
       // Keep the live feed pinned to the bottom while it grows.
       React.useEffect(() => {
         const node = scroller.current
@@ -239,6 +264,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(null)
         setOutput('')
+        setImageFailed(false)
         try {
           const data = await api.fullme('start', {})
           if (!data.ok) throw new Error(data.error ?? '取验证码失败')
@@ -283,7 +309,8 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const waiting = status?.phase === 'waiting'
+      // A challenge whose socket died is not waiting for anybody.
+      const waiting = status?.phase === 'waiting' && status?.connected !== false
       const locked = Boolean(status?.lock)
 
       const header = h('div', { style: styles.header },
@@ -292,7 +319,7 @@ window.__ModuleLoader__.load({
           status?.connected ? `已连接 ${status.host ?? ''}`.trim() : '未连接'),
         locked ? h('span', { style: styles.chip }, '🐱 人工接管中') : null,
         status?.needsHuman ? h('span', { style: styles.chip }, 'fullme 待处理') : null,
-        status?.watchdog === false
+        status?.watchdog === false || status?.idleTimeoutMs === 0
           ? h('span', { style: styles.muted }, '看门狗关闭')
           : status?.idleLogoutInMs != null && !locked
             ? h('span', { style: styles.muted }, `${Math.max(0, Math.round(status.idleLogoutInMs / 1000))}s 后闲置下线`)
@@ -301,9 +328,17 @@ window.__ModuleLoader__.load({
       const fullmeBar = waiting
         ? h('div', { style: { ...styles.fullme, background: 'rgba(217,140,36,0.06)' }, 'data-panel': 'fullme' },
           h('div', { style: styles.warn }, '验证码待人工处理，模型操作已暂停'),
-          status?.imageUrl
-            ? h('img', { src: status.imageUrl, alt: 'fullme 验证码', style: styles.image })
-            : h('div', { style: styles.muted }, '正在取图…'),
+          imageFailed
+            ? h('div', { style: styles.error }, '验证码图加载失败，请「取消接管」后重新开始')
+            : status?.imageUrl
+              ? h('img', {
+                src: status.imageUrl,
+                alt: 'fullme 验证码',
+                style: styles.image,
+                referrerPolicy: 'no-referrer',
+                onError: () => setImageFailed(true),
+              })
+              : h('div', { style: styles.muted }, '正在取图…'),
           h('div', { style: { display: 'flex', gap: '6px' } },
             h('input', {
               value: answer,
@@ -332,7 +367,9 @@ window.__ModuleLoader__.load({
               type: 'button',
               'data-action': 'fullme-start',
               style: styles.button,
-              disabled: busy || !status?.connected,
+              // The host connects on demand; greying this out would leave the
+              // human with no way back after the idle watchdog logged out.
+              disabled: busy,
               onClick: () => startChallenge(),
             }, busy ? '取图中…' : '开始 fullme 验证'),
             h('span', { style: styles.muted }, '需要人眼读图；期间模型操作会暂停')))
@@ -352,18 +389,20 @@ window.__ModuleLoader__.load({
           ? entry.kind === 'server'
           : entry.kind === 'agent' || entry.kind === 'event'))
         body = rows.length
-          ? rows.map((entry) => h('div', { key: entry.seq, style: styles.row },
-            h('span', { style: styles.time }, entry.at.slice(11, 19)),
+          ? rows.map((entry, index) => h('div', { key: entry.seq ?? `${index}`, style: styles.row },
+            h('span', { style: styles.time }, (entry.at ?? '').slice(11, 19)),
             entry.kind === 'server'
               ? h('span', { style: { flex: 1, wordBreak: 'break-word' } }, entry.text)
               : h(React.Fragment, null,
                 h('span', { style: styles.actor(entry.actor) }, actorLabel(entry)),
                 h('span', { style: { flex: 1, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-word' } }, entry.text))))
-          : h('div', { style: styles.empty }, tab === 'log' ? '还没有服务器输出' : '模型还没有操作')
+          : h('div', { style: styles.empty }, status === null
+            ? '正在读取…'
+            : tab === 'log' ? '还没有服务器输出' : '模型还没有操作')
       } else {
         const section = tab === 'plan' ? notes?.plan : notes?.diary
         body = section === null || section === undefined
-          ? h('div', { style: styles.empty }, '没有配置这个文件')
+          ? h('div', { style: styles.empty }, status === null ? '正在读取…' : '没有配置这个文件')
           : h('div', null,
             h('div', { style: styles.muted },
               `${section.path}${section.mtime ? ` · ${section.mtime.slice(0, 19).replace('T', ' ')}` : ''}${section.truncated ? ' · 只显示结尾' : ''}`),
@@ -385,13 +424,23 @@ window.__ModuleLoader__.load({
 
     /** Header button: bring the panel up for the current session. */
     function OpenTabButton({ openTab }) {
+      const [failed, setFailed] = React.useState(false)
       return h('button', {
         type: 'button',
         title: '打开 MUD 面板（日志 / AI 操作 / 计划）',
         'data-action': 'mud-open',
         style: { ...styles.button, height: '26px', padding: '0 8px' },
-        onClick: () => openTab(),
-      }, '🐱 MUD')
+        onClick: () => {
+          // The sidebar service can be composed while no session surface is
+          // mounted yet; that is a normal "not ready", not a broken button.
+          try {
+            openTab()
+            setFailed(false)
+          } catch {
+            setFailed(true)
+          }
+        },
+      }, failed ? '🐱 先打开一个会话' : '🐱 MUD')
     }
 
     // Only `slots` is a hard dependency: the header button is useful even if the
@@ -418,8 +467,12 @@ window.__ModuleLoader__.load({
           id: TAB_ID,
           kind: TAB_KIND,
           title: () => 'MUD',
+          // Switching 日志↔日记 must not drop the cursor, the scroll position
+          // or a captcha answer someone just typed.
+          keepMounted: true,
           guide: [{
             id: 'open',
+            order: 70,
             title: () => 'MUD',
             description: () => '实时日志、AI 操作、下一步计划与日记',
           }],
